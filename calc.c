@@ -79,10 +79,7 @@ static void skip_spaces(Parser *p) {
 static long long parse_expression(Parser *p);
 static long long parse_power(Parser *p);
 
- /*
-  * A primary is an integer or an expression inside parentheses.
-  * Parser design was developed with assistance from ChatGPT (OpenAI).
-  */
+
 static long long parse_primary(Parser *p) {
     skip_spaces(p);
 
@@ -129,7 +126,6 @@ static long long parse_primary(Parser *p) {
     return value;
 }
 
-/* Calculate a non-negative integer power by repeated squaring. */
 static long long integer_power(long long base, long long exponent) {
     long long result = 1;
 
@@ -148,7 +144,6 @@ static long long integer_power(long long base, long long exponent) {
     return result;
 }
 
-/* Parse ** from right to left, giving it higher precedence than * and /. */
 static long long parse_power(Parser *p) {
     long long value = parse_primary(p);
     if (p->error_pos != 0) return 0;
@@ -196,7 +191,6 @@ static long long parse_term(Parser *p) {
 
         char op = p->s[p->pos++];
 
-        /* A second * belongs to the power operator, not multiplication. */
         if (op == '*' && p->pos < p->end && p->s[p->pos] == '*') {
             p->error_pos = p->pos + 1;
             return 0;
@@ -288,7 +282,8 @@ static void process_text(char *buf, size_t len, FILE *out) {
             j++;
         }
 
-        if (j < end) {
+        /* Ignore blank lines and comment lines. */
+        if (j < end && buf[j] != '#') {
             size_t line_error = 0;
             long long result = eval_line(buf, j, end, &line_error);
 
@@ -300,7 +295,7 @@ static void process_text(char *buf, size_t len, FILE *out) {
             fprintf(temp, "%lld\n", result);
         }
 
-        i = end + 1;
+        i = nl ? end + 1 : len;
     }
 
     if (error_pos != 0) {
