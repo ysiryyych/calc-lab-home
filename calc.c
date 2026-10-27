@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #define NAME "yaroslava"
 #define LASTNAME "sirychenko"
@@ -312,59 +313,279 @@ static void process_text(char *buf, size_t len, FILE *out) {
     fclose(temp);
 }
 
-int main(int argc, char **argv) {
-    const char *outdir = NULL;
-    const char *input = NULL;
+static const char *base_name(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
 
-    for (int a = 1; a < argc; a++) {
-        if (strcmp(argv[a], "-o") == 0 && a + 1 < argc) {
-            outdir = argv[++a];
-        } else {
-            input = argv[a];
+static int ends_with_txt(const char *name) {
+    size_t len = strlen(name);
+    return len >= 4 && strcmp(name + len - 4, ".txt") == 0;
+}
+
+static char *make_path(const char *dir, const char *name) {
+    size_t size = strlen(dir) + strlen(name) + 2;
+    char *path = malloc(size);
+
+    if (path) {
+        snprintf(path, size, "%s/%s", dir, name);
+    }
+
+    return path;
+}
+
+static int ensure_dir(const char *dir) {
+    struct stat st;
+
+    if (stat(dir, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+            return 0;
         }
+
+        fprintf(stderr, "%s is not a directory\n", dir);
+        return -1;
     }
 
-    if (!outdir || !input) {
-        fprintf(stderr, "usage: calc -o OUTDIR input.txt\n");
-        return 1;
+    if (mkdir(dir, 0777) == 0) {
+        return 0;
     }
 
+    fprintf(stderr, "cannot create folder %s\n", dir);
+    return -1;
+}
+
+static int process_file(const char *input, const char *outdir) {
     size_t len = 0;
     char *text = read_file(input, &len);
 
     if (!text) {
         fprintf(stderr, "cannot read %s\n", input);
-        return 1;
+        return -1;
     }
 
-    if (mkdir(outdir, 0777) != 0 && errno != EEXIST) {
-        fprintf(stderr, "cannot create folder %s\n", outdir);
+    const char *base = base_name(input);
+    size_t base_len = strlen(base);
+
+    if (ends_with_txt(base)) {
+        base_len -= 4;
+    }
+
+    int name_len = snprintf(NULL, 0,
+        "%.*s_%s_%s_%s.txt",
+        (int)base_len, base, NAME, LASTNAME, STUDENTID);
+
+    if (name_len < 0) {
         free(text);
-        return 1;
+        return -1;
     }
 
-    const char *base = strrchr(input, '/');
-    base = base ? base + 1 : input;
+    char *filename = malloc((size_t)name_len + 1);
 
-    size_t baselen = strlen(base);
-    if (baselen > 4 && strcmp(base + baselen - 4, ".txt") == 0) {
-        baselen -= 4;
+    if (!filename) {
+        free(text);
+        return -1;
     }
 
-    char path[1024];
-    snprintf(path, sizeof path,
-             "%s/%.*s_" NAME "_" LASTNAME "_" STUDENTID ".txt",
-             outdir, (int)baselen, base);
+    snprintf(filename, (size_t)name_len + 1,
+        "%.*s_%s_%s_%s.txt",
+        (int)base_len, base, NAME, LASTNAME, STUDENTID);
+
+    char *path = make_path(outdir, filename);
+    free(filename);
+
+    if (!path) {
+        free(text);
+        return -1;
+    }
 
     FILE *out = fopen(path, "wb");
+
     if (!out) {
         fprintf(stderr, "cannot write %s\n", path);
+        free(path);
         free(text);
-        return 1;
+        return -1;
     }
 
     process_text(text, len, out);
-    fclose(out);
+
+    int failed = ferror(out);
+    if (fclose(out) != 0) {
+        failed = 1;
+    }
+
+    free(path);
     free(text);
-    return 0;
+    return failed ? -1 : 0;
+}
+
+static int process_dir(const char *indir, const char *outdir) {
+    DIR *dir = opendir(indir);
+
+    if (!dir) {
+        fprintf(stderr, "cannot open folder %s\n", indir);
+        return -1;
+    }
+
+    char **files = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    struct dirent *entry;
+    int failed = 0;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (!ends_with_txt(entry->d_name)) {
+            continue;
+        }
+
+        char *path = make_path(indir, entry->d_name);
+
+        if (!path) {
+            failed = 1;
+            break;
+        }
+
+        struct stat st;
+
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            free(path);
+            continue;
+        }
+
+        free(path);
+
+        if (count == capacity) {
+            size_t new_capacity = capacity ? capacity * 2 : 8;
+            char **tmp = realloc(files,
+                                 new_capacity * sizeof(*files));
+
+            if (!tmp) {
+                failed = 1;
+                break;
+            }
+
+            files = tmp;
+            capacity = new_capacity;
+        }
+
+        size_t name_len = strlen(entry->d_name) + 1;
+files[count] = malloc(name_len);
+
+if (files[count] != NULL) {
+    memcpy(files[count], entry->d_name, name_len);
+}
+
+        if (!files[count]) {
+            failed = 1;
+            break;
+        }
+
+        count++;
+    }
+
+    closedir(dir);
+
+    /* Finish collecting inputs before creating output files. */
+    for (size_t i = 0; i < count; i++) {
+        if (!failed) {
+            char *input = make_path(indir, files[i]);
+
+            if (!input || process_file(input, outdir) != 0) {
+                failed = 1;
+            }
+
+            free(input);
+        }
+
+        free(files[i]);
+    }
+
+    free(files);
+    return failed ? -1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *indir = NULL;
+    const char *input = NULL;
+    const char *outdir = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-d") == 0 ||
+            strcmp(argv[i], "--dir") == 0) {
+            if (indir || i + 1 >= argc ||
+                argv[i + 1][0] == '-') {
+                goto usage_error;
+            }
+
+            indir = argv[++i];
+        } else if (strcmp(argv[i], "-o") == 0 ||
+                   strcmp(argv[i], "--output-dir") == 0) {
+            if (outdir || i + 1 >= argc ||
+                argv[i + 1][0] == '-') {
+                goto usage_error;
+            }
+
+            outdir = argv[++i];
+        } else if (argv[i][0] == '-') {
+            goto usage_error;
+        } else {
+            if (input) {
+                goto usage_error;
+            }
+
+            input = argv[i];
+        }
+    }
+
+    if ((indir && input) || (!indir && !input)) {
+        goto usage_error;
+    }
+
+    char *default_outdir = NULL;
+
+    if (!outdir) {
+        const char *base = base_name(indir ? indir : input);
+        size_t len = strlen(base);
+
+        if (!indir && ends_with_txt(base)) {
+            len -= 4;
+        }
+
+        int n = snprintf(NULL, 0, "%.*s_%s_%s",
+                         (int)len, base, NAME, STUDENTID);
+
+        if (n < 0) {
+            return 1;
+        }
+
+        default_outdir = malloc((size_t)n + 1);
+
+        if (!default_outdir) {
+            return 1;
+        }
+
+        snprintf(default_outdir, (size_t)n + 1,
+                 "%.*s_%s_%s",
+                 (int)len, base, NAME, STUDENTID);
+
+        outdir = default_outdir;
+    }
+
+    if (ensure_dir(outdir) != 0) {
+        free(default_outdir);
+        return 1;
+    }
+
+    int result = indir
+        ? process_dir(indir, outdir)
+        : process_file(input, outdir);
+
+    free(default_outdir);
+    return result == 0 ? 0 : 1;
+
+usage_error:
+    fprintf(stderr,
+        "usage: calc [-d DIR | --dir DIR] "
+        "[-o OUTDIR | --output-dir OUTDIR] [input.txt]\n");
+    return 1;
 }
