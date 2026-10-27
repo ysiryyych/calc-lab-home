@@ -2,7 +2,7 @@
  // Yaroslava Sirychenko 251ADB151
 // https://github.com/<ysiryyych>/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources used: ChatGPT (OpenAI), for parser design and debugging.
+// Resources used: <every AI tool, website and book you used; details in comments where you used them>
 
 #include <ctype.h>
 #include <errno.h>
@@ -77,10 +77,11 @@ static void skip_spaces(Parser *p) {
 }
 
 static long long parse_expression(Parser *p);
+static long long parse_power(Parser *p);
 
  /*
-  * A primary expression is either an integer or an expression in
-  * parentheses. This parser code was developed with AI assistance.
+  * A primary is an integer or an expression inside parentheses.
+  * Parser design was developed with assistance from ChatGPT (OpenAI).
   */
 static long long parse_primary(Parser *p) {
     skip_spaces(p);
@@ -94,9 +95,7 @@ static long long parse_primary(Parser *p) {
         p->pos++;
 
         long long value = parse_expression(p);
-        if (p->error_pos != 0) {
-            return 0;
-        }
+        if (p->error_pos != 0) return 0;
 
         skip_spaces(p);
 
@@ -120,6 +119,7 @@ static long long parse_primary(Parser *p) {
     }
 
     long long value = 0;
+
     while (p->pos < p->end &&
            isdigit((unsigned char)p->s[p->pos])) {
         value = value * 10 + (p->s[p->pos] - '0');
@@ -129,8 +129,61 @@ static long long parse_primary(Parser *p) {
     return value;
 }
 
-static long long parse_term(Parser *p) {
+/* Calculate a non-negative integer power by repeated squaring. */
+static long long integer_power(long long base, long long exponent) {
+    long long result = 1;
+
+    while (exponent > 0) {
+        if (exponent % 2 != 0) {
+            result *= base;
+        }
+
+        exponent /= 2;
+
+        if (exponent > 0) {
+            base *= base;
+        }
+    }
+
+    return result;
+}
+
+/* Parse ** from right to left, giving it higher precedence than * and /. */
+static long long parse_power(Parser *p) {
     long long value = parse_primary(p);
+    if (p->error_pos != 0) return 0;
+
+    skip_spaces(p);
+
+    if (p->pos + 1 >= p->end ||
+        p->s[p->pos] != '*' ||
+        p->s[p->pos + 1] != '*') {
+        return value;
+    }
+
+    p->pos += 2;
+    skip_spaces(p);
+
+    size_t exponent_start = p->pos;
+
+    if (p->pos < p->end && p->s[p->pos] == '-') {
+        p->error_pos = p->pos + 1;
+        return 0;
+    }
+
+    long long exponent = parse_power(p);
+    if (p->error_pos != 0) return 0;
+
+    if (exponent < 0) {
+        p->error_pos = exponent_start + 1;
+        return 0;
+    }
+
+    return integer_power(value, exponent);
+}
+
+static long long parse_term(Parser *p) {
+    long long value = parse_power(p);
     if (p->error_pos != 0) return 0;
 
     while (1) {
@@ -142,10 +195,17 @@ static long long parse_term(Parser *p) {
         }
 
         char op = p->s[p->pos++];
+
+        /* A second * belongs to the power operator, not multiplication. */
+        if (op == '*' && p->pos < p->end && p->s[p->pos] == '*') {
+            p->error_pos = p->pos + 1;
+            return 0;
+        }
+
         skip_spaces(p);
         size_t right_start = p->pos;
 
-        long long right = parse_primary(p);
+        long long right = parse_power(p);
         if (p->error_pos != 0) return 0;
 
         if (op == '*') {
@@ -155,6 +215,7 @@ static long long parse_term(Parser *p) {
                 p->error_pos = right_start + 1;
                 return 0;
             }
+
             value /= right;
         }
     }
@@ -196,6 +257,7 @@ static long long eval_line(const char *s, size_t start, size_t end,
 
     if (p.error_pos == 0) {
         skip_spaces(&p);
+
         if (p.pos < p.end) {
             p.error_pos = p.pos + 1;
         }
@@ -207,6 +269,7 @@ static long long eval_line(const char *s, size_t start, size_t end,
 
 static void process_text(char *buf, size_t len, FILE *out) {
     FILE *temp = tmpfile();
+
     if (!temp) {
         fprintf(stderr, "cannot create temporary file\n");
         return;
@@ -244,6 +307,7 @@ static void process_text(char *buf, size_t len, FILE *out) {
         fprintf(out, "ERROR:%zu\n", error_pos);
     } else {
         rewind(temp);
+
         int ch;
         while ((ch = fgetc(temp)) != EOF) {
             fputc(ch, out);
@@ -272,6 +336,7 @@ int main(int argc, char **argv) {
 
     size_t len = 0;
     char *text = read_file(input, &len);
+
     if (!text) {
         fprintf(stderr, "cannot read %s\n", input);
         return 1;
