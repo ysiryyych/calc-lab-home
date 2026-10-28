@@ -2,7 +2,9 @@
  // Yaroslava Sirychenko 251ADB151
 // https://github.com/<ysiryyych>/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources used: <every AI tool, website and book you used; details in comments where you used them>
+// Resources used: https://beej.us/guide/bgc/html/split/file-inputoutput.html#file-inputoutput
+//https://github.com/WarpRules/recursive_descent_parser_tutorial
+// https://chatgpt.com/share/6ae15d1a-78e8-83ed-8a39-31f9e6e6aaf7
 
 #include <ctype.h>
 #include <errno.h>
@@ -11,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <math.h>
 
 #define NAME "yaroslava"
 #define LASTNAME "sirychenko"
@@ -20,11 +23,12 @@ static char *read_file(const char *path, size_t *len_out) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
 
+
     size_t cap = 4096, len = 0;
     char *buf = malloc(cap);
     if (!buf) {
         fclose(f);
-        return NULL;
+        return NULL; // If malloc fails, close the file and report failure by returning NULL.
     }
 
     size_t n;
@@ -38,6 +42,8 @@ static char *read_file(const char *path, size_t *len_out) {
                 return NULL;
             }
 
+// Double the buffer capacity when full to limit reallocations
+// while reading large files.
             cap *= 2;
             char *tmp = realloc(buf, cap);
             if (!tmp) {
@@ -60,13 +66,37 @@ static char *read_file(const char *path, size_t *len_out) {
     *len_out = len;
     return buf;
 }
-
+// Track positions to report the exact location of a parsing error
+// pos and end are zero-based offsets in the full input buffer; end is exclusive.
+// error_pos is 1-based for output, and 0 means no error has been recorded.
 typedef struct {
     const char *s;
     size_t pos;
     size_t end;
     size_t error_pos;
 } Parser;
+
+
+
+typedef struct {
+    long long integer;
+    double floating;
+    int is_float;
+} Value;
+
+static Value make_integer(long long n) {
+    Value v = {n, (double)n, 0};
+    return v;
+}
+
+static Value make_float(double n) {
+    Value v = {0, n, 1};
+    return v;
+}
+
+static double as_double(Value v) {
+    return v.is_float ? v.floating : (double)v.integer;
+}
 
 static void skip_spaces(Parser *p) {
     while (p->pos < p->end &&
@@ -76,35 +106,41 @@ static void skip_spaces(Parser *p) {
         p->pos++;
     }
 }
+// Separate parsing levels enforce operator precedence:
+// powers are parsed inside terms, and terms inside expressions.
+static Value parse_expression(Parser *p); 
+// Recursive parsing of the exponent makes ** right-associative:
+// 2**3**2 is evaluated as 2**(3**2).
+static Value parse_power(Parser *p); 
 
-static long long parse_expression(Parser *p);
-static long long parse_power(Parser *p);
-
-
-static long long parse_primary(Parser *p) {
+static Value parse_primary(Parser *p) {
     skip_spaces(p);
 
     if (p->pos >= p->end) {
+        // No token remains where a value is required, so report the line break or EOF position
         p->error_pos = p->end + 1;
-        return 0;
+        return make_integer(0);
     }
 
+    // Parsing a full expression inside parentheses lets them override normal precedence
     if (p->s[p->pos] == '(') {
         p->pos++;
 
-        long long value = parse_expression(p);
-        if (p->error_pos != 0) return 0;
+        Value value = parse_expression(p); 
+        if (p->error_pos != 0) return make_integer(0);
 
         skip_spaces(p);
 
         if (p->pos >= p->end) {
+            // Report where the missing closing ')' was expected: at the line break or EOF.
             p->error_pos = p->end + 1;
-            return 0;
+            return make_integer(0);
         }
 
         if (p->s[p->pos] != ')') {
+            // Report the error at the unexpected character
             p->error_pos = p->pos + 1;
-            return 0;
+            return make_integer(0);
         }
 
         p->pos++;
@@ -113,23 +149,51 @@ static long long parse_primary(Parser *p) {
 
     if (!isdigit((unsigned char)p->s[p->pos])) {
         p->error_pos = p->pos + 1;
-        return 0;
+        return make_integer(0);
     }
 
-    long long value = 0;
+    long long integer_part = 0;
 
     while (p->pos < p->end &&
            isdigit((unsigned char)p->s[p->pos])) {
-        value = value * 10 + (p->s[p->pos] - '0');
+        integer_part = integer_part * 10 +
+                       (p->s[p->pos] - '0');
         p->pos++;
     }
 
-    return value;
+    if (p->pos < p->end && p->s[p->pos] == '.') {
+        size_t dot_pos = p->pos;
+        p->pos++;
+
+        if (p->pos >= p->end ||
+            // This character cannot start a number or parenthesized expression, so report it
+            !isdigit((unsigned char)p->s[p->pos])) {
+            // A decimal point must be followed by a digit, so report the dot itself
+            p->error_pos = dot_pos + 1;
+            return make_integer(0);
+        }
+
+        double value = (double)integer_part;
+        double place = 0.1;
+
+        while (p->pos < p->end &&
+               isdigit((unsigned char)p->s[p->pos])) {
+            value += (p->s[p->pos] - '0') * place;
+            place *= 0.1;
+            p->pos++;
+        }
+
+        return make_float(value);
+    }
+
+    return make_integer(integer_part);
 }
 
-static long long integer_power(long long base, long long exponent) {
+static long long integer_power(long long base,
+                               long long exponent) {
     long long result = 1;
 
+    // Exponentiation by squaring reduces the number of multiplications to O(log exponent)
     while (exponent > 0) {
         if (exponent % 2 != 0) {
             result *= base;
@@ -145,9 +209,10 @@ static long long integer_power(long long base, long long exponent) {
     return result;
 }
 
-static long long parse_power(Parser *p) {
-    long long value = parse_primary(p);
-    if (p->error_pos != 0) return 0;
+static Value parse_power(Parser *p) {
+    // Parsing the exponent with parse_power() makes ** right-associative: 2**3**2 is evaluated as 2**(3**2)
+    Value value = parse_primary(p);
+    if (p->error_pos != 0) return make_integer(0);
 
     skip_spaces(p);
 
@@ -157,30 +222,47 @@ static long long parse_power(Parser *p) {
         return value;
     }
 
+    size_t operator_pos = p->pos;
     p->pos += 2;
     skip_spaces(p);
 
     size_t exponent_start = p->pos;
 
     if (p->pos < p->end && p->s[p->pos] == '-') {
+        // Unary minus is not allowed here, so report the '-' that prevents parsing the exponent
         p->error_pos = p->pos + 1;
-        return 0;
+        return make_integer(0);
     }
 
-    long long exponent = parse_power(p);
-    if (p->error_pos != 0) return 0;
+    Value exponent = parse_power(p);
+    if (p->error_pos != 0) return make_integer(0);
 
-    if (exponent < 0) {
+    if (!exponent.is_float && exponent.integer < 0) {
+        // Report the start of the exponent expression when its evaluated integer value is negative
         p->error_pos = exponent_start + 1;
-        return 0;
+        return make_integer(0);
+    }
+// Use integer exponentiation when both operands are integers; otherwise use floating-point pow()
+    if (!value.is_float && !exponent.is_float  && exponent.integer < 0) {
+        return make_integer(
+            integer_power(value.integer, exponent.integer));
     }
 
-    return integer_power(value, exponent);
+    double result = pow(as_double(value), as_double(exponent));
+
+    if (!isfinite(result)) {
+        // Report the ** operator when the floating-point result is not finite
+        p->error_pos = operator_pos + 1;
+        return make_integer(0);
+    }
+
+    return make_float(result);
 }
 
-static long long parse_term(Parser *p) {
-    long long value = parse_power(p);
-    if (p->error_pos != 0) return 0;
+static Value parse_term(Parser *p) {
+    // Parsing powers as operands makes ** bind more tightly than * and /
+    Value value = parse_power(p);
+    if (p->error_pos != 0) return make_integer(0);
 
     while (1) {
         skip_spaces(p);
@@ -190,37 +272,62 @@ static long long parse_term(Parser *p) {
             break;
         }
 
+        size_t operator_pos = p->pos;
         char op = p->s[p->pos++];
 
-        if (op == '*' && p->pos < p->end && p->s[p->pos] == '*') {
+        // If ** has no usable exponent, report its second '*' instead of treating it as multiplication
+        if (op == '*' && p->pos < p->end &&
+            p->s[p->pos] == '*') {
             p->error_pos = p->pos + 1;
-            return 0;
+            return make_integer(0);
         }
 
         skip_spaces(p);
         size_t right_start = p->pos;
 
-        long long right = parse_power(p);
-        if (p->error_pos != 0) return 0;
+        Value right = parse_power(p);
+        if (p->error_pos != 0) return make_integer(0);
 
-        if (op == '*') {
-            value *= right;
+        if (op == '/' &&
+            (right.is_float
+                ? right.floating == 0.0
+                : right.integer == 0)) {
+ // Report division by zero at the start of the right operand.
+            p->error_pos = right_start + 1;
+            return make_integer(0);
+        }
+
+        // Keep integer arithmetic when both operands are integers to avoid unnecessary floating-point conversion.
+        if (!value.is_float && !right.is_float) {
+            if (op == '*') {
+                value = make_integer(
+                    value.integer * right.integer);
+            } else {
+                value = make_integer(
+                    value.integer / right.integer);
+            }
         } else {
-            if (right == 0) {
-                p->error_pos = right_start + 1;
-                return 0;
+            double a = as_double(value);
+            double b = as_double(right);
+            double result = (op == '*') ? a * b : a / b;
+
+            if (!isfinite(result)) {
+                // Report the operator that caused a non-finite floating-point result
+                p->error_pos = operator_pos + 1;
+                return make_integer(0);
             }
 
-            value /= right;
+            value = make_float(result);
         }
     }
 
     return value;
 }
 
-static long long parse_expression(Parser *p) {
-    long long value = parse_term(p);
-    if (p->error_pos != 0) return 0;
+static Value parse_expression(Parser *p) {
+    // Parsing terms before + and - gives multiplication and division higher precedence
+    Value value = parse_term(p);
+    if (p->error_pos != 0) return make_integer(0);
 
     while (1) {
         skip_spaces(p);
@@ -230,39 +337,61 @@ static long long parse_expression(Parser *p) {
             break;
         }
 
+        size_t operator_pos = p->pos;
         char op = p->s[p->pos++];
-        long long right = parse_term(p);
-        if (p->error_pos != 0) return 0;
 
-        if (op == '+') {
-            value += right;
+        Value right = parse_term(p);
+        if (p->error_pos != 0) return make_integer(0);
+
+
+// Keep + and - in integer arithmetic unless either operand is floating-point
+        if (!value.is_float && !right.is_float) {
+            if (op == '+') {
+                value = make_integer(
+                    value.integer + right.integer);
+            } else {
+                value = make_integer(
+                    value.integer - right.integer);
+            }
         } else {
-            value -= right;
+            double a = as_double(value);
+            double b = as_double(right);
+            double result = (op == '+') ? a + b : a - b;
+
+            if (!isfinite(result)) {
+                // Report the operator that caused a non-finite floating-point result
+                p->error_pos = operator_pos + 1;
+                return make_integer(0);
+            }
+
+            value = make_float(result);
         }
     }
 
     return value;
 }
 
-static long long eval_line(const char *s, size_t start, size_t end,
-                           size_t *error_pos) {
+static Value eval_line(const char *s, size_t start, size_t end,
+                       size_t *error_pos) {
     Parser p = {s, start, end, 0};
 
-    long long result = parse_expression(&p);
+    Value result = parse_expression(&p);
 
     if (p.error_pos == 0) {
         skip_spaces(&p);
-
+// After a valid expression, the first remaining non-space character is unexpected
         if (p.pos < p.end) {
             p.error_pos = p.pos + 1;
         }
     }
 
     *error_pos = p.error_pos;
-    return (*error_pos != 0) ? 0 : result;
+    return (*error_pos != 0) ? make_integer(0) : result;
 }
 
+
 static void process_text(char *buf, size_t len, FILE *out) {
+    // Keep results temporary so a later error can replace all output with ERROR:<pos>
     FILE *temp = tmpfile();
 
     if (!temp) {
@@ -270,6 +399,7 @@ static void process_text(char *buf, size_t len, FILE *out) {
         return;
     }
 
+    // Keep offsets in the original buffer so error positions include earlier lines and newlines
     size_t i = 0;
     size_t error_pos = 0;
 
@@ -283,18 +413,18 @@ static void process_text(char *buf, size_t len, FILE *out) {
             j++;
         }
 
-        /* Ignore blank lines and comment lines. */
         if (j < end && buf[j] != '#') {
             size_t line_error = 0;
-            long long result = eval_line(buf, j, end, &line_error);
-
-            if (line_error != 0) {
+            Value result = eval_line(buf, j, end, &line_error);            if (line_error != 0) {
                 error_pos = line_error;
                 break;
             }
-
-            fprintf(temp, "%lld\n", result);
-        }
+            
+            if (result.is_float) {
+    fprintf(temp, "%.15g\n", result.floating);
+} else {
+    fprintf(temp, "%lld\n", result.integer);
+}        }
 
         i = nl ? end + 1 : len;
     }
@@ -485,7 +615,7 @@ if (files[count] != NULL) {
 
     closedir(dir);
 
-    /* Finish collecting inputs before creating output files. */
+
     for (size_t i = 0; i < count; i++) {
         if (!failed) {
             char *input = make_path(indir, files[i]);
